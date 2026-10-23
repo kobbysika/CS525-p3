@@ -233,6 +233,7 @@ void test_route_parse_rejects_bad_lines_without_changing_output(void)
   static const char *const invalid[] = {
     "", "default direct", "default direct eth0 extra",
     "10.1.2.5/24 direct eth0", "10.0.0.0/8 bad eth0",
+    "default 1111111111111111 eth0",
     "10.0.0.0/8 direct abcdefghijklmnop",
     "10.0.0.000000/8 direct eth0", "default 1.2.3.4 ",
     "default\ndirect eth0", "default direct\neth0"
