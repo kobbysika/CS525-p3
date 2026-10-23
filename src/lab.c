@@ -1,7 +1,17 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "lab.h"
 
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+struct fwd_table {
+  route_t *routes;
+  size_t count;
+  size_t capacity;
+};
 
 static bool parse_decimal(const char **cursor, unsigned int maximum,
                           unsigned int *value)
@@ -204,4 +214,204 @@ bool cidr_subnet(cidr_t block, uint32_t n, uint32_t i, cidr_t *out)
   result.prefix = new_prefix;
   *out = result;
   return true;
+}
+
+static const char *skip_whitespace(const char *text)
+{
+  while (*text != '\0' && isspace((unsigned char)*text) != 0) {
+    ++text;
+  }
+  return text;
+}
+
+static bool skip_field_separator(const char **cursor)
+{
+  if (**cursor != ' ' && **cursor != '\t') {
+    return false;
+  }
+  while (**cursor == ' ' || **cursor == '\t') {
+    ++*cursor;
+  }
+  return true;
+}
+
+static bool copy_field(const char **cursor, char *field, size_t capacity)
+{
+  const char *start = *cursor;
+  size_t length;
+
+  while (**cursor != '\0' && isspace((unsigned char)**cursor) == 0) {
+    ++*cursor;
+  }
+  length = (size_t)(*cursor - start);
+  if (length == 0U || length >= capacity) {
+    return false;
+  }
+
+  memcpy(field, start, length);
+  field[length] = '\0';
+  return true;
+}
+
+bool route_parse(const char *line, route_t *route)
+{
+  char destination[CIDR_STR_LEN];
+  char gateway[IP_STR_LEN];
+  char device[DEV_NAME_LEN];
+  const char *cursor;
+  route_t parsed;
+
+  if (line == NULL || route == NULL) {
+    return false;
+  }
+
+  cursor = skip_whitespace(line);
+  if (!copy_field(&cursor, destination, sizeof(destination))) {
+    return false;
+  }
+  if (!skip_field_separator(&cursor)) {
+    return false;
+  }
+  if (!copy_field(&cursor, gateway, sizeof(gateway))) {
+    return false;
+  }
+  if (!skip_field_separator(&cursor)) {
+    return false;
+  }
+  if (!copy_field(&cursor, device, sizeof(device))) {
+    return false;
+  }
+  if (*skip_whitespace(cursor) != '\0') {
+    return false;
+  }
+
+  if (strcmp(destination, "default") == 0) {
+    parsed.dest.addr = 0;
+    parsed.dest.prefix = 0;
+  } else if (!cidr_parse(destination, &parsed.dest) ||
+             !cidr_is_network(parsed.dest)) {
+    return false;
+  }
+
+  if (strcmp(gateway, "direct") == 0) {
+    parsed.gateway = 0;
+  } else if (!ip_parse(gateway, &parsed.gateway)) {
+    return false;
+  }
+
+  memcpy(parsed.dev, device, strlen(device) + 1U);
+  *route = parsed;
+  return true;
+}
+
+fwd_table_t *table_create(void)
+{
+  return calloc(1U, sizeof(fwd_table_t));
+}
+
+void table_destroy(fwd_table_t *table)
+{
+  if (table != NULL) {
+    free(table->routes);
+    free(table);
+  }
+}
+
+size_t table_count(const fwd_table_t *table)
+{
+  return table == NULL ? 0U : table->count;
+}
+
+bool table_add(fwd_table_t *table, const route_t *route)
+{
+  route_t *grown;
+  size_t new_capacity;
+
+  if (table == NULL || route == NULL || !cidr_is_network(route->dest)) {
+    return false;
+  }
+
+  for (size_t i = 0; i < table->count; ++i) {
+    if (table->routes[i].dest.addr == route->dest.addr &&
+        table->routes[i].dest.prefix == route->dest.prefix) {
+      return false;
+    }
+  }
+
+  if (table->count == table->capacity) {
+    new_capacity = table->capacity == 0U ? 4U : table->capacity * 2U;
+    grown = realloc(table->routes, new_capacity * sizeof(*grown));
+    if (grown == NULL) { // GCOVR_EXCL_LINE
+      return false; // GCOVR_EXCL_LINE
+    }
+    table->routes = grown;
+    table->capacity = new_capacity;
+  }
+
+  table->routes[table->count] = *route;
+  ++table->count;
+  return true;
+}
+
+bool table_load(fwd_table_t *table, FILE *in, size_t *bad_line)
+{
+  char *line = NULL;
+  size_t capacity = 0;
+  size_t line_number = 0;
+  ssize_t length;
+
+  if (bad_line != NULL) {
+    *bad_line = 0;
+  }
+  if (table == NULL || in == NULL) {
+    return false;
+  }
+
+  while ((length = getline(&line, &capacity, in)) >= 0) {
+    char *comment;
+    const char *content;
+    route_t route;
+
+    (void)length;
+    ++line_number;
+    comment = strchr(line, '#');
+    if (comment != NULL) {
+      *comment = '\0';
+    }
+    content = skip_whitespace(line);
+    if (*content == '\0') {
+      continue;
+    }
+    if (!route_parse(content, &route) || !table_add(table, &route)) {
+      if (bad_line != NULL) {
+        *bad_line = line_number;
+      }
+      free(line);
+      return false;
+    }
+  }
+
+  free(line);
+  if (ferror(in) != 0) { // GCOVR_EXCL_LINE
+    return false; // GCOVR_EXCL_LINE
+  }
+  return true;
+}
+
+const route_t *table_lookup(const fwd_table_t *table, uint32_t dest)
+{
+  const route_t *best = NULL;
+
+  if (table == NULL) {
+    return NULL;
+  }
+
+  for (size_t i = 0; i < table->count; ++i) {
+    const route_t *candidate = &table->routes[i];
+    if (cidr_contains(candidate->dest, dest) &&
+        (best == NULL || candidate->dest.prefix > best->dest.prefix)) {
+      best = candidate;
+    }
+  }
+  return best;
 }
