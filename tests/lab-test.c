@@ -89,6 +89,123 @@ void test_cidr_format_preserves_address_and_clamps_prefix(void)
   TEST_ASSERT_EQUAL_STRING("255.255.255.255/32", text);
 }
 
+void test_cidr_mask_handles_every_boundary(void)
+{
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0), cidr_mask(0));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0x80000000), cidr_mask(1));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xFFFFFF00), cidr_mask(24));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xFFFFFFFE), cidr_mask(31));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_MAX, cidr_mask(32));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_MAX, cidr_mask(99));
+}
+
+void test_cidr_network_and_broadcast_clear_and_set_host_bits(void)
+{
+  cidr_t block = {UINT32_C(0x84B2E30B), 25};
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0x84B2E300), cidr_network(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0x84B2E37F), cidr_broadcast(block));
+
+  block.addr = UINT32_C(0x12345678);
+  block.prefix = 0;
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0), cidr_network(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_MAX, cidr_broadcast(block));
+}
+
+void test_cidr_host_ranges_handle_regular_31_and_32_blocks(void)
+{
+  cidr_t block = {UINT32_C(0xC0A8010A), 24};
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A80101), cidr_first_host(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A801FE), cidr_last_host(block));
+  TEST_ASSERT_EQUAL_UINT64(UINT64_C(254), cidr_host_count(block));
+
+  block.addr = UINT32_C(0xC0A8010B);
+  block.prefix = 31;
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A8010A), cidr_first_host(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A8010B), cidr_last_host(block));
+  TEST_ASSERT_EQUAL_UINT64(UINT64_C(2), cidr_host_count(block));
+
+  block.prefix = 32;
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A8010B), cidr_first_host(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A8010B), cidr_last_host(block));
+  TEST_ASSERT_EQUAL_UINT64(UINT64_C(1), cidr_host_count(block));
+
+  block.prefix = 99;
+  TEST_ASSERT_EQUAL_UINT64(UINT64_C(1), cidr_host_count(block));
+}
+
+void test_cidr_host_count_uses_64_bit_arithmetic_for_default_route(void)
+{
+  cidr_t block = {0, 0};
+  TEST_ASSERT_EQUAL_UINT64(UINT64_C(4294967294), cidr_host_count(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(1), cidr_first_host(block));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xFFFFFFFE), cidr_last_host(block));
+}
+
+void test_cidr_contains_and_is_network(void)
+{
+  cidr_t block = {UINT32_C(0x0A010200), 24};
+  TEST_ASSERT_TRUE(cidr_contains(block, UINT32_C(0x0A010200)));
+  TEST_ASSERT_TRUE(cidr_contains(block, UINT32_C(0x0A0102FF)));
+  TEST_ASSERT_FALSE(cidr_contains(block, UINT32_C(0x0A010300)));
+  TEST_ASSERT_TRUE(cidr_is_network(block));
+
+  block.addr = UINT32_C(0x0A010201);
+  TEST_ASSERT_FALSE(cidr_is_network(block));
+
+  block.addr = UINT32_C(0xDEADBEEF);
+  block.prefix = 0;
+  TEST_ASSERT_TRUE(cidr_contains(block, UINT32_C(0)));
+  TEST_ASSERT_TRUE(cidr_contains(block, UINT32_MAX));
+  TEST_ASSERT_FALSE(cidr_is_network(block));
+}
+
+void test_cidr_subnet_returns_requested_equal_subnet(void)
+{
+  cidr_t block = {UINT32_C(0xC0A80100), 24};
+  cidr_t subnet = {0, 0};
+
+  TEST_ASSERT_TRUE(cidr_subnet(block, 4, 0, &subnet));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A80100), subnet.addr);
+  TEST_ASSERT_EQUAL_UINT8(26, subnet.prefix);
+  TEST_ASSERT_TRUE(cidr_subnet(block, 4, 3, &subnet));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xC0A801C0), subnet.addr);
+  TEST_ASSERT_EQUAL_UINT8(26, subnet.prefix);
+
+  TEST_ASSERT_TRUE(cidr_subnet(block, 1, 0, &subnet));
+  TEST_ASSERT_EQUAL_HEX32(block.addr, subnet.addr);
+  TEST_ASSERT_EQUAL_UINT8(block.prefix, subnet.prefix);
+}
+
+void test_cidr_subnet_supports_a_very_large_legal_split(void)
+{
+  cidr_t block = {0, 0};
+  cidr_t subnet = {0, 0};
+  uint32_t n = UINT32_C(1) << 31U;
+
+  TEST_ASSERT_TRUE(cidr_subnet(block, n, n - 1U, &subnet));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0xFFFFFFFE), subnet.addr);
+  TEST_ASSERT_EQUAL_UINT8(31, subnet.prefix);
+}
+
+void test_cidr_subnet_rejects_invalid_requests_without_changing_output(void)
+{
+  cidr_t network = {UINT32_C(0xC0A80100), 24};
+  cidr_t host_block = {UINT32_C(0xC0A80105), 24};
+  cidr_t too_small = {UINT32_C(0xC0A80100), 31};
+  cidr_t invalid_prefix = {UINT32_C(0xC0A80100), 33};
+  cidr_t sentinel = {UINT32_C(0x12345678), 17};
+
+  TEST_ASSERT_FALSE(cidr_subnet(network, 4, 0, NULL));
+  TEST_ASSERT_FALSE(cidr_subnet(host_block, 4, 0, &sentinel));
+  TEST_ASSERT_FALSE(cidr_subnet(network, 0, 0, &sentinel));
+  TEST_ASSERT_FALSE(cidr_subnet(network, 3, 0, &sentinel));
+  TEST_ASSERT_FALSE(cidr_subnet(network, 4, 4, &sentinel));
+  TEST_ASSERT_FALSE(cidr_subnet(too_small, 4, 0, &sentinel));
+  TEST_ASSERT_FALSE(cidr_subnet(invalid_prefix, 1, 0, &sentinel));
+  TEST_ASSERT_EQUAL_HEX32(UINT32_C(0x12345678), sentinel.addr);
+  TEST_ASSERT_EQUAL_UINT8(17, sentinel.prefix);
+}
+
 int main(void)
 {
   UNITY_BEGIN();
@@ -98,5 +215,13 @@ int main(void)
   RUN_TEST(test_cidr_parse_accepts_valid_blocks);
   RUN_TEST(test_cidr_parse_rejects_malformed_blocks);
   RUN_TEST(test_cidr_format_preserves_address_and_clamps_prefix);
+  RUN_TEST(test_cidr_mask_handles_every_boundary);
+  RUN_TEST(test_cidr_network_and_broadcast_clear_and_set_host_bits);
+  RUN_TEST(test_cidr_host_ranges_handle_regular_31_and_32_blocks);
+  RUN_TEST(test_cidr_host_count_uses_64_bit_arithmetic_for_default_route);
+  RUN_TEST(test_cidr_contains_and_is_network);
+  RUN_TEST(test_cidr_subnet_returns_requested_equal_subnet);
+  RUN_TEST(test_cidr_subnet_supports_a_very_large_legal_split);
+  RUN_TEST(test_cidr_subnet_rejects_invalid_requests_without_changing_output);
   return UNITY_END();
 }
