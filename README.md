@@ -1,4 +1,4 @@
-# Project 3: IPv4 Routing Table
+# Project 3 - Subnetting and Forwarding
 
 - Name: Perry Aryee
 - Email: perryaryee@u.boisestate.edu
